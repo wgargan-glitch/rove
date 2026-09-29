@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rove Map</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=Source+Sans+3:wght@400;600&display=swap" rel="stylesheet" />
+  <link href="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.css" rel="stylesheet" />
+  <link href="css/rove-map.css" rel="stylesheet" />
+</head>
+<body>
+  <div id="map"></div>
+
+  <div class="chrome topbar">
+    <div class="brand">
+      <div class="mark">Rove <span>Map</span></div>
+      <div class="sub">OpenStreetMap · driving via OSRM</div>
+    </div>
+    <div class="search-wrap">
+      <input id="q" type="search" placeholder="Search parks, states, gateway towns" autocomplete="off" />
+      <div id="results" class="results"></div>
+    </div>
+    <div class="tools">
+      <button type="button" data-style="dark" class="active">Night</button>
+      <button type="button" data-style="liberty">Day</button>
+      <button type="button" data-style="fiord">Fiord</button>
+      <button type="button" id="fit-us">Lower 48</button>
+      <button type="button" id="fit-world">World</button>
+    </div>
+  </div>
+
+  <aside class="chrome sidebar">
+    <section class="panel" id="drive-panel">
+      <h2 style="margin:0;padding:14px 16px 8px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">Drive</h2>
+      <div class="body" style="padding:0 16px 14px">
+        <div class="field">
+          <label for="from">From</label>
+          <input id="from" placeholder="Address, town, or My location" autocomplete="off" />
+          <div id="from-suggest" class="suggest"></div>
+        </div>
+        <div class="field">
+          <label for="to">To</label>
+          <input id="to" placeholder="Park or destination" autocomplete="off" />
+          <div id="to-suggest" class="suggest"></div>
+        </div>
+        <div class="drive-actions">
+          <button type="button" class="chip" id="use-location">My location</button>
+          <button type="button" class="chip" id="use-gateway">Park gateway</button>
+          <button type="button" class="chip active" id="go">Get directions</button>
+          <button type="button" class="chip" id="clear-route">Clear</button>
+        </div>
+        <p id="route-summary" class="meta" style="margin:10px 0 0;color:var(--muted)"></p>
+      </div>
+    </section>
+    <section class="panel detail" id="detail"></section>
+    <section class="panel route-box" id="steps-panel" hidden>
+      <h2 style="margin:0;padding:14px 16px 8px;font-size:13px;letter-spacing:.08em;text-transform:uppercase;color:var(--muted)">Turn by turn</h2>
+      <p id="route-error" class="err" hidden></p>
+      <ol class="steps" id="steps"></ol>
+    </section>
+    <section class="panel list">
+      <h2 id="list-count">Parks</h2>
+      <div id="list"></div>
+    </section>
+  </aside>
+
+  <div class="legend">
+    <b>63 U.S. national parks</b><br />
+    Directions use OpenStreetMap / OSRM. Not for emergency navigation.
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@5.6.1/dist/maplibre-gl.js"></script>
+  <script type="module">
+    import { RoveMap } from "./js/rove-map.js";
+
+    const rove = new RoveMap({ container: "map", style: "dark" });
+    window.rove = rove;
+
+    const listEl = document.getElementById("list");
+    const countEl = document.getElementById("list-count");
+    const detailEl = document.getElementById("detail");
+    const qEl = document.getElementById("q");
+    const resultsEl = document.getElementById("results");
+    const fromEl = document.getElementById("from");
+    const toEl = document.getElementById("to");
+    const fromSuggest = document.getElementById("from-suggest");
+    const toSuggest = document.getElementById("to-suggest");
+    const summaryEl = document.getElementById("route-summary");
+    const stepsEl = document.getElementById("steps");
+    const stepsPanel = document.getElementById("steps-panel");
+    const routeError = document.getElementById("route-error");
+
+    let origin = null;
+    let dest = null;
+
+    function renderList(parks) {
+      countEl.textContent = `${parks.length} parks`;
+      listEl.innerHTML = parks
+        .slice()
+        .sort((a, b) => a.name.localeCompare(b.name))
+        .map(
+          (p) => `<button class="park-row${rove.selected === p.slug ? " selected" : ""}" data-slug="${p.slug}">
+            <div class="name">${p.name}</div>
+            <div class="meta">${p.state} · ${p.pickupTown}</div>
+          </button>`
+        )
+        .join("");
+    }
+
+    function renderDetail(park) {
+      if (!park) {
+        detailEl.classList.remove("open");
+        detailEl.innerHTML = "";
+        return;
+      }
+      detailEl.classList.add("open");
+      detailEl.innerHTML = `
+        <h2>Selected</h2>
+        <div class="body">
+          <h3 class="name">${park.name}</h3>
+          <div class="meta">${park.region}</div>
+          <dl>
+            <dt>State</dt><dd>${park.state}</dd>
+            <dt>Gateway</dt><dd>${park.pickupTown}</dd>
+            <dt>Since</dt><dd>${park.established || "—"}</dd>
+          </dl>
+          <div class="actions">
+            <a class="chip" href="/parks/${park.slug}" target="_top">Cars at this park</a>
+            <button type="button" class="chip" id="drive-here">Drive here</button>
+          </div>
+        </div>`;
+      detailEl.querySelector("#drive-here").onclick = () => setDestFromPark(park);
+    }
+
+    function setQuery(parks) {
+      resultsEl.innerHTML = parks
+        .slice(0, 12)
+        .map(
+          (p) => `<button data-slug="${p.slug}"><span>${p.name}</span><small>${p.state} · ${p.pickupTown}</small></button>`
+        )
+        .join("");
+      resultsEl.classList.toggle("open", parks.length > 0 && qEl.value.trim().length > 0);
+    }
+
+    function setDestFromPark(park) {
+      dest = { lng: park.lng, lat: park.lat, label: park.name };
+      toEl.value = park.name;
+      toSuggest.classList.remove("open");
+    }
+
+    function bindSuggest(input, box, onPick) {
+      let timer;
+      input.addEventListener("input", () => {
+        clearTimeout(timer);
+        const q = input.value.trim();
+        if (q.length < 2) {
+          box.classList.remove("open");
+          return;
+        }
+        timer = setTimeout(async () => {
+          const parkHits = rove.search(q).slice(0, 4);
+          let geo = [];
+          try { geo = await rove.geocode(q); } catch {}
+          const items = [
+            ...parkHits.map((p) => ({ label: `${p.name} National Park`, lng: p.lng, lat: p.lat, park: p })),
+            ...geo,
+          ].slice(0, 8);
+          box.innerHTML = items
+            .map((item, i) => `<button data-i="${i}">${item.label}</button>`)
+            .join("");
+          box.dataset.items = JSON.stringify(items);
+          box.classList.toggle("open", items.length > 0);
+        }, 220);
+      });
+      box.addEventListener("click", (e) => {
+        const btn = e.target.closest("button");
+        if (!btn) return;
+        const items = JSON.parse(box.dataset.items || "[]");
+        const item = items[Number(btn.dataset.i)];
+        if (!item) return;
+        input.value = item.label;
+        box.classList.remove("open");
+        onPick(item);
+      });
+    }
+
+    async function runRoute() {
+      routeError.hidden = true;
+      if (!origin || !dest) {
+        routeError.hidden = false;
+        routeError.textContent = "Set a start and a destination first.";
+        stepsPanel.hidden = false;
+        return;
+      }
+      summaryEl.textContent = "Routing…";
+      try {
+        const route = await rove.routeDrive(origin, dest);
+        const { miles, duration } = window.roveFormat;
+        summaryEl.textContent = `${miles(route.distance)} · ${duration(route.duration)}`;
+        stepsEl.innerHTML = route.steps
+          .map((s) => `<li><span>${s.instruction}</span><span class="dist">${miles(s.distance)}</span></li>`)
+          .join("");
+        stepsPanel.hidden = false;
+      } catch (err) {
+        summaryEl.textContent = "";
+        routeError.hidden = false;
+        routeError.textContent = err.message || "Could not build a drive.";
+        stepsPanel.hidden = false;
+      }
+    }
+
+    rove.on("parks-loaded", (parks) => {
+      renderList(parks);
+      const params = new URLSearchParams(location.search);
+      const hash = location.hash.replace("#", "");
+      const start = params.get("park") || hash;
+      if (start) {
+        const park = rove.parkBySlug(start);
+        if (park) {
+          rove.focusPark(start);
+          setDestFromPark(park);
+        }
+      } else {
+        rove.fitUSA();
+      }
+    });
+
+    rove.on("select", (park) => {
+      history.replaceState(null, "", `?park=${park.slug}#${park.slug}`);
+      renderList(rove.search(qEl.value));
+      renderDetail(park);
+      setDestFromPark(park);
+    });
+
+    listEl.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-slug]");
+      if (btn) rove.focusPark(btn.dataset.slug);
+    });
+
+    resultsEl.addEventListener("click", (e) => {
+      const btn = e.target.closest("[data-slug]");
+      if (!btn) return;
+      qEl.value = "";
+      resultsEl.classList.remove("open");
+      rove.focusPark(btn.dataset.slug);
+    });
+
+    qEl.addEventListener("input", () => {
+      const hits = rove.search(qEl.value);
+      renderList(hits);
+      setQuery(hits);
+    });
+
+    bindSuggest(fromEl, fromSuggest, (item) => {
+      origin = { lng: item.lng, lat: item.lat, label: item.label };
+    });
+    bindSuggest(toEl, toSuggest, (item) => {
+      dest = { lng: item.lng, lat: item.lat, label: item.label };
+      if (item.park) rove.focusPark(item.park.slug);
+    });
+
+    document.getElementById("use-location").onclick = async () => {
+      try {
+        origin = await rove.locate();
+        origin.label = "My location";
+        fromEl.value = "My location";
+      } catch (err) {
+        routeError.hidden = false;
+        routeError.textContent = err.message;
+        stepsPanel.hidden = false;
+      }
+    };
+
+    document.getElementById("use-gateway").onclick = () => {
+      const park = rove.parkBySlug(rove.selected);
+      if (!park) return;
+      origin = { lng: park.lng, lat: park.lat, label: park.pickupTown };
+      fromEl.value = park.pickupTown;
+    };
+
+    document.getElementById("go").onclick = () => runRoute();
+    document.getElementById("clear-route").onclick = () => {
+      rove.clearRoute();
+      summaryEl.textContent = "";
+      stepsEl.innerHTML = "";
+      stepsPanel.hidden = true;
+    };
+
+    document.querySelectorAll("[data-style]").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        document.querySelectorAll("[data-style]").forEach((b) => b.classList.remove("active"));
+        btn.classList.add("active");
+        rove.setStyle(btn.dataset.style);
+      });
+    });
+
+    document.getElementById("fit-us").onclick = () => rove.fitUSA();
+    document.getElementById("fit-world").onclick = () =>
+      rove.map.flyTo({ center: [10, 20], zoom: 1.6, essential: true });
+
+    window.addEventListener("message", (event) => {
+      const msg = event.data;
+      if (!msg || msg.target !== "rove-map") return;
+      if (msg.action === "focus" && msg.slug) rove.focusPark(msg.slug);
+      if (msg.action === "listings") rove.setListings(msg.listings || []);
+      if (msg.action === "style") rove.setStyle(msg.style);
+      if (msg.action === "route" && msg.origin && msg.dest) {
+        origin = msg.origin;
+        dest = msg.dest;
+        runRoute();
+      }
+    });
+
+    await rove.loadParks();
+  </script>
+</body>
+</html>

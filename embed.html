@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Rove Map embed demo</title>
+  <style>
+    body { margin: 0; font-family: Georgia, serif; background: #111; color: #eee; }
+    header { padding: 16px 20px; }
+    iframe { width: 100%; height: calc(100vh - 72px); border: 0; }
+    button { margin-right: 8px; }
+  </style>
+</head>
+<body>
+  <header>
+    Drop this iframe into Rove. Parent page talks to the map with postMessage.
+    <div>
+      <button id="yose">Focus Yosemite</button>
+      <button id="zion">Focus Zion</button>
+      <button id="cars">Show sample cars</button>
+    </div>
+  </header>
+  <iframe id="frame" src="./index.html" title="Rove Map"></iframe>
+  <script>
+    const frame = document.getElementById("frame");
+    function send(payload) {
+      frame.contentWindow.postMessage({ target: "rove-map", ...payload }, "*");
+    }
+    document.getElementById("yose").onclick = () => send({ action: "focus", slug: "yosemite" });
+    document.getElementById("zion").onclick = () => send({ action: "focus", slug: "zion" });
+    document.getElementById("cars").onclick = () => send({
+      action: "listings",
+      listings: [
+        { id: "bronco-yosemite", title: "Bronco", lng: -119.67, lat: 37.67 },
+        { id: "4runner-zion", title: "4Runner", lng: -113.05, lat: 37.18 }
+      ]
+    });
+    window.addEventListener("message", (e) => {
+      if (e.data?.source === "rove-map") console.log("from map", e.data);
+    });
+  </script>
+</body>
+</html>
